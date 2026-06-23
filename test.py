@@ -85,3 +85,4 @@ while cs.alt > 0.1:
 
 print 'Vehicle has landed successfully!'
 print '--- Script Finished ---'
+print 'Success!'
