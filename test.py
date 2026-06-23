@@ -31,7 +31,7 @@ print 'Motors ARMED!'
 
 # 3. Takeoff
 # Set a guided target at the current location but 2 meters up
-takeoff_alt = 2.0
+takeoff_alt = 1.0
 print 'Taking off to %sm...' % takeoff_alt
 
 wp_takeoff = Locationwp()
