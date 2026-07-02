@@ -4,7 +4,7 @@
 import MAVLink
 import math
 
-TARGET_ALTITUDE = 0.14        # Increased slightly to clear ground effect noise
+TARGET_ALTITUDE = 0.4       # Increased slightly to clear ground effect noise
 DESIRED_DISTANCE_M = 0       # METERS - set to 0 for up/down only test
 
 TRAVEL_PWM = 1480             
@@ -18,10 +18,14 @@ ARM_RETRY_LIMIT = 3
 
 # --- AUTOMATED THROTTLE SETTINGS ---
 THROTTLE_HOVER_CH = 3
-THROTTLE_ZERO = 1000          
-THROTTLE_TAKEOFF_PWM = 1599
-THROTTLE_HOLD_PWM = 1500      
-THROTTLE_LAND_PWM = 1350      
+THROTTLE_ZERO = 1000
+THROTTLE_TAKEOFF_PWM = 1580   # Reduced from 1630 - gentler climb to limit I-term buildup
+THROTTLE_HOLD_PWM = 1500      # True center = hold altitude in ALTHOLD (1510 was still climbing)
+THROTTLE_LAND_PWM = 1350
+
+# --- SAFETY LIMITS ---
+MAX_SAFE_ALTITUDE = 1.5       # Hard ceiling - immediately cut throttle if exceeded
+ALTITUDE_OVERSHOOT_MARGIN = 0.15  # Start backing off throttle this far above target
 
 print('--- Minimal Hardware Test: Takeoff / Travel-by-distance / Land ---')
 
@@ -61,80 +65,114 @@ else:
     Script.Sleep(1500)  
 
     # ==========================================
-    # STATE 1: AUTOMATED TAKEOFF (TIMED PULSE)
+    # STATE 1: AUTOMATED TAKEOFF (RAMPED CLIMB)
     # ==========================================
-    print('Automated Takeoff: Commencing guaranteed lift-off pulse...')
-    Script.SendRC(THROTTLE_HOVER_CH, THROTTLE_TAKEOFF_PWM, True)
-    
-    # Force a 1.5 second climb pulse to physically get off the ground 
-    # before checking the barometer feedback.
-    Script.Sleep(1500) 
+    print('Automated Takeoff: Ramping throttle for controlled lift-off...')
 
-    # Supplemental climb check if still below target
+    # Ramp throttle up gradually over ~1s to avoid I-term windup
+    ramp_steps = 5
+    ramp_start = THROTTLE_HOLD_PWM
+    for i in range(1, ramp_steps + 1):
+        ramp_pwm = ramp_start + int((THROTTLE_TAKEOFF_PWM - ramp_start) * i / ramp_steps)
+        Script.SendRC(THROTTLE_HOVER_CH, ramp_pwm, True)
+        Script.Sleep(200)
+
+    # Hold takeoff throttle but monitor altitude with CEILING CHECK
+    safety_triggered = False
     climb_timeout = 0
-    while cs.alt < (TARGET_ALTITUDE - 0.05) and climb_timeout < 10:
-        print('Adjusting altitude to target... Alt: {0:.2f}m'.format(cs.alt))
+    while cs.alt < (TARGET_ALTITUDE - 0.05) and climb_timeout < 15:
+        # SAFETY: hard ceiling - switch to LAND mode immediately
+        if cs.alt > MAX_SAFE_ALTITUDE:
+            print('SAFETY: Alt {0:.2f}m exceeds ceiling! Switching to LAND mode.'.format(cs.alt))
+            Script.SendRC(THROTTLE_HOVER_CH, 0, True)
+            Script.ChangeMode('LAND')
+            safety_triggered = True
+            break
+        # Back off throttle if overshooting target
+        if cs.alt > (TARGET_ALTITUDE + ALTITUDE_OVERSHOOT_MARGIN):
+            print('Overshoot detected at {0:.2f}m, backing off throttle.'.format(cs.alt))
+            Script.SendRC(THROTTLE_HOVER_CH, THROTTLE_HOLD_PWM, True)
+            break
+        print('Climbing... Alt: {0:.2f}m'.format(cs.alt))
         Script.Sleep(200)
         climb_timeout += 1
 
-    # ==========================================
-    # STATE 2: AUTOMATED HOVER (CENTER THROTTLE)
-    # ==========================================
-    Script.SendRC(THROTTLE_HOVER_CH, THROTTLE_HOLD_PWM, True)
-    print('Takeoff phase complete. Throttle centered to hover: Alt={0:.2f}m'.format(cs.alt))
-    Script.Sleep(2000)  
-
-    # ==========================================
-    # STATE 3: OPTIONAL HORIZONTAL TRAVEL
-    # ==========================================
-    if DESIRED_DISTANCE_M > 0:
-        pwm_offset = 1500 - TRAVEL_PWM
-        angle_deg = (pwm_offset / RC_PITCH_RANGE) * PILOT_ANGLE_MAX_DEG
-        accel = GRAVITY * math.tan(math.radians(angle_deg))
-        travel_duration = math.sqrt((2.0 * DESIRED_DISTANCE_M) / accel)
-
-        if travel_duration > MAX_TRAVEL_DURATION:
-            travel_duration = MAX_TRAVEL_DURATION
-
-        print('Executing automated forward tilt pulse for {0:.2f}s...'.format(travel_duration))
-        Script.SendRC(2, TRAVEL_PWM, True)
-        Script.Sleep(int(travel_duration * 1000))
-        Script.SendRC(2, 1500, True)  
-        print('Travel complete. Stabilizing. Alt={0:.2f}m'.format(cs.alt))
-        Script.Sleep(1500)
+    if safety_triggered:
+        # Wait for LAND mode to bring drone down and disarm
+        print('LAND mode active. Waiting for touchdown...')
+        land_wait = 0
+        while cs.armed and land_wait < 30:
+            print('LAND mode descending... Alt: {0:.2f}m'.format(cs.alt))
+            Script.Sleep(1000)
+            land_wait += 1
+        print('Safety landing complete. Disarmed: {0}'.format(not cs.armed))
     else:
-        print('DESIRED_DISTANCE_M is 0 - Skipping horizontal flight phase.')
+        # ==========================================
+        # STATE 2: AUTOMATED HOVER (CENTER THROTTLE)
+        # ==========================================
+        # Ramp down to hover instead of abrupt step
+        current_pwm = THROTTLE_TAKEOFF_PWM
+        while current_pwm > THROTTLE_HOLD_PWM:
+            current_pwm = max(THROTTLE_HOLD_PWM, current_pwm - 20)
+            Script.SendRC(THROTTLE_HOVER_CH, current_pwm, True)
+            Script.Sleep(100)
 
-    # ==========================================
-    # STATE 4: AUTOMATED LANDING
-    # ==========================================
-    print('Automated Landing: Step throttle down to initiate descent...')
-    Script.SendRC(THROTTLE_HOVER_CH, THROTTLE_LAND_PWM, True)
+        print('Takeoff phase complete. Throttle centered to hover: Alt={0:.2f}m'.format(cs.alt))
 
-    # Monitor descent until close to the ground
-    land_timeout = 0
-    while cs.alt > 0.05 and land_timeout < 25:
-        print('Descending automatically... Alt: {0:.2f}m'.format(cs.alt))
-        Script.Sleep(200)
-        land_timeout += 1
+        # Monitor hover with safety ceiling
+        hover_time = 0
+        while hover_time < 20:  # 2 seconds of hover monitoring
+            if cs.alt > MAX_SAFE_ALTITUDE:
+                print('SAFETY: Alt {0:.2f}m exceeds ceiling during hover! Switching to LAND.'.format(cs.alt))
+                Script.SendRC(THROTTLE_HOVER_CH, 0, True)
+                Script.ChangeMode('LAND')
+                safety_triggered = True
+                break
+            Script.Sleep(100)
+            hover_time += 1
 
-    # ==========================================
-    # STATE 5: AUTOMATED MOTOR SHUTDOWN / DISARM
-    # ==========================================
-    print('Ground proximity detected. Cutting throttle completely.')
-    Script.SendRC(THROTTLE_HOVER_CH, THROTTLE_ZERO, True)
-    
-    waited = 0
-    while cs.armed and waited < ARM_POLL_TIMEOUT:
-        Script.Sleep(1000)
-        waited += 1
-    
-    if cs.armed:
-        print('Executing fallback disarm command...')
-        MAV.doARM(False)
-        Script.Sleep(1000)
+    if not safety_triggered:
+        # ==========================================
+        # STATE 3: OPTIONAL HORIZONTAL TRAVEL
+        # ==========================================
+        if DESIRED_DISTANCE_M > 0:
+            pwm_offset = 1500 - TRAVEL_PWM
+            angle_deg = (pwm_offset / RC_PITCH_RANGE) * PILOT_ANGLE_MAX_DEG
+            accel = GRAVITY * math.tan(math.radians(angle_deg))
+            travel_duration = math.sqrt((2.0 * DESIRED_DISTANCE_M) / accel)
 
-    print('Disarmed status: {0}'.format(not cs.armed))
+            if travel_duration > MAX_TRAVEL_DURATION:
+                travel_duration = MAX_TRAVEL_DURATION
+
+            print('Executing automated forward tilt pulse for {0:.2f}s...'.format(travel_duration))
+            Script.SendRC(2, TRAVEL_PWM, True)
+            Script.Sleep(int(travel_duration * 1000))
+            Script.SendRC(2, 1500, True)
+            print('Travel complete. Stabilizing. Alt={0:.2f}m'.format(cs.alt))
+            Script.Sleep(1500)
+        else:
+            print('DESIRED_DISTANCE_M is 0 - Skipping horizontal flight phase.')
+
+        # ==========================================
+        # STATE 4: AUTOMATED LANDING (LAND MODE)
+        # ==========================================
+        print('Automated Landing: Switching to LAND mode...')
+        Script.SendRC(THROTTLE_HOVER_CH, 0, True)
+        Script.ChangeMode('LAND')
+
+        land_wait = 0
+        while cs.armed and land_wait < 30:
+            print('LAND mode descending... Alt: {0:.2f}m'.format(cs.alt))
+            Script.Sleep(1000)
+            land_wait += 1
+
+        # Fallback disarm if LAND mode didn't auto-disarm
+        if cs.armed:
+            print('Executing fallback disarm command...')
+            MAV.doARM(False)
+            Script.Sleep(1000)
+
+        print('Disarmed status: {0}'.format(not cs.armed))
 
 # ==========================================
 # CLEANUP: RELEASE OVERRIDES FOR NEXT RUN
