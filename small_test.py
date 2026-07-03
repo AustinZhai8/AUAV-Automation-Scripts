@@ -16,18 +16,25 @@ MAX_TRAVEL_DURATION = 3.0
 ARM_POLL_TIMEOUT = 15
 ARM_RETRY_LIMIT = 3
 
-# --- AUTOMATED THROTTLE SETTINGS ---
+# --- DRONE PARAMS (from current parameters.param) ---
+# Update these if you recalibrate RC or change params!
 THROTTLE_HOVER_CH = 3
-THROTTLE_ZERO = 1000
-THROTTLE_TAKEOFF_PWM = 1580   # Reduced from 1630 - gentler climb to limit I-term buildup
-THROTTLE_HOLD_PWM = 1500      # True center = hold altitude in ALTHOLD (1510 was still climbing)
+RC3_MIN = 1000
+RC3_MAX = 2000
+THR_DZ = 100              # ALTHOLD deadzone
+
+THROTTLE_ZERO = RC3_MIN
+THROTTLE_HOLD_PWM = (RC3_MIN + RC3_MAX) / 2           # = 1500
+THROTTLE_TAKEOFF_PWM = int(THROTTLE_HOLD_PWM + THR_DZ + 20)  # = 1620 (above deadzone)
 THROTTLE_LAND_PWM = 1350
 
 # --- SAFETY LIMITS ---
-MAX_SAFE_ALTITUDE = 1.5       # Hard ceiling - immediately cut throttle if exceeded
+MAX_SAFE_ALTITUDE = 1.5       # Hard ceiling - switch to LAND mode
 ALTITUDE_OVERSHOOT_MARGIN = 0.15  # Start backing off throttle this far above target
 
 print('--- Minimal Hardware Test: Takeoff / Travel-by-distance / Land ---')
+print('Throttle: hover={0} deadzone_top={1} takeoff={2}'.format(
+    int(THROTTLE_HOLD_PWM), int(THROTTLE_HOLD_PWM + THR_DZ), THROTTLE_TAKEOFF_PWM))
 
 # Step 1: Force AltHold Mode to bypass EKF position safety blocks
 Script.ChangeMode('ALTHOLD')
@@ -136,7 +143,8 @@ else:
         # STATE 3: OPTIONAL HORIZONTAL TRAVEL
         # ==========================================
         if DESIRED_DISTANCE_M > 0:
-            pwm_offset = 1500 - TRAVEL_PWM
+            RC2_TRIM = 1501  # from current parameters.param
+            pwm_offset = RC2_TRIM - TRAVEL_PWM
             angle_deg = (pwm_offset / RC_PITCH_RANGE) * PILOT_ANGLE_MAX_DEG
             accel = GRAVITY * math.tan(math.radians(angle_deg))
             travel_duration = math.sqrt((2.0 * DESIRED_DISTANCE_M) / accel)
@@ -147,7 +155,7 @@ else:
             print('Executing automated forward tilt pulse for {0:.2f}s...'.format(travel_duration))
             Script.SendRC(2, TRAVEL_PWM, True)
             Script.Sleep(int(travel_duration * 1000))
-            Script.SendRC(2, 1500, True)
+            Script.SendRC(2, RC2_TRIM, True)
             print('Travel complete. Stabilizing. Alt={0:.2f}m'.format(cs.alt))
             Script.Sleep(1500)
         else:
